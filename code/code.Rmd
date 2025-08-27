@@ -1,0 +1,1229 @@
+---
+title: "Alps Snowfall"
+author: "Van Thuan Romoli"
+date: "2024-08-11"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#PACKAGES LOADING
+library(ggplot2)
+library(ggmap)
+library(texmex)
+library(ismev)
+```
+
+# Data exploration and visualisation
+
+Our data is a list consisting of land variables. Each of these variables is organised as a $49 \times 29 \times 174$ matrix where $49 \times 29$ is the spatial grid overlaying the Italian Alps and the last number indicates the month number, starting from January 2010.
+
+```{r}
+
+load("Alps_precip.Rdata")
+
+# plot parameters
+par(cex.axis=2,cex.lab =2.5)
+par(mfrow=c(1,1))
+par(oma=c(2,2,2,2))
+par(mar=c(2,2,2,2))
+par(mgp=c(0,2,0))
+#c(bottom, left, top, right)
+
+example <- data$snow_fall[,,(12 + 11 * 12)]
+
+image(example)
+```
+
+Furthermore, we show how \texttt{ggplot2} can be used to augment our plotting capabilities.
+
+```{r}
+df <- data.frame("snowfall"=c(data$snow_fall[,,(12 + 11 * 12)]),
+                 "lon"=c(lonlat[,,1]),
+                 "lat"=c(lonlat[,,2])
+)
+
+indbox = make_bbox(lon = c(min(df$lon), max(df$lon))+c(-3,3), lat = c(max(df$lat), min(df$lat)), f = 0)
+world <- map_data("world")
+p = ggplot() +
+  geom_map(
+    data = world, map = world,
+    aes(long, lat, map_id = region),
+    color = "black", fill = "lightgray", size = 0.1
+  ) + scale_x_continuous(limits=indbox[c(1,3)]) + scale_y_continuous(limits=indbox[c(2,4)]) + coord_fixed(ratio=1.4) +
+geom_tile(df, mapping = aes(x = lon, y = lat, fill = snowfall), width = 0.27, height = 0.27) + theme(text = element_text(size=20))
+
+p
+```
+
+# Long format, data cleaning, and normalisation
+
+To be able to analyse the data set, we need to reshape our $49 \times 29 \times 174$ matrix to a long data frame of 18 columns and 247254 rows, where each column represents a variable (including land variables, longitude, latitude, and month) and each row contains the information of a specific location (identified through the variables latitude and longitude) in a specific month. We store this to a data frame called `alps_df`.
+
+We write a function to "flatten" the grid to a vector.
+
+```{r}
+grid_to_vector <- function(mydataset) {
+  h = 1
+  temp_list <- vector(length = length(mydataset))
+  for (i in 1:dim(mydataset)[1]) {
+    for (j in 1:dim(mydataset)[2]) {
+       for (k in 1:dim(mydataset)[3]) {
+         temp_list[h] <- mydataset[i,j,k]
+         h = h + 1
+      }
+    }
+  }
+  return(temp_list)
+}
+```
+
+We apply this function to every land variable. For longitude, latitude, and altitude we slightly tweak the above function.
+
+```{r}
+snow_fall <- grid_to_vector(data$snow_fall)
+air_temp <- grid_to_vector(data$air_temp)
+precip <- grid_to_vector(data$precip)
+wind_u <- grid_to_vector(data$wind_u)
+wind_v <- grid_to_vector(data$wind_v)
+dewpoint_temp <- grid_to_vector(data$dewpoint_temp)
+anisotropy <- grid_to_vector(data$anisotropy)
+slope <- grid_to_vector(data$slope)
+sd <- grid_to_vector(data$sd)
+isotropy <- grid_to_vector(data$isotropy)
+land_sea <- grid_to_vector(data$`land-sea`)
+mean_sealevelpressure <- grid_to_vector(data$mean_sealevelpressue)
+geopotential <- grid_to_vector(data$geopotential)
+
+lon <- vector(length = 49 * 29 * 174)
+h = 1
+for (i in 1:49) {
+  for (j in 1:29) {
+    for  (k in 1:174){
+      lon[h] <- lonlat[i,j,1]
+      h = h+1
+    }
+  }
+}
+
+lat <- vector(length = 49 * 29 * 174)
+h = 1
+for (i in 1:49) {
+  for (j in 1:29) {
+    for  (k in 1:174){
+      lat[h] <- lonlat[i,j,2]
+      h = h+1
+    }
+  }
+}
+
+load("elev.Rdata")
+alt <- vector(length = 49 * 29 * 174)
+h = 1
+for (i in 1:49) {
+  for (j in 1:29) {
+    for  (k in 1:174){
+      alt[h] <- elev[i,j]
+      h = h+1
+    }
+  }
+}
+
+months <- c(rep(1:12,14),c(1,2,3,4,5,6))
+```
+
+Now, we combine all of the above into a new data frame.
+
+```{r}
+alps_df <- data.frame(air_temp,alt,wind_u,wind_v,dewpoint_temp,anisotropy,slope,sd,isotropy,land_sea,mean_sealevelpressure,geopotential,dates,months,lon,lat,snow_fall,precip)
+```
+
+We remove all rows that have a na value.
+
+```{r}
+alps_df <- na.omit(alps_df)
+```
+
+To help with the analysis we remove the zero values and change the measurement unit to millimetres.
+
+```{r}
+alps_extremes <- alps_df[alps_df$snow_fall > 0,]
+alps_extremes$snow_fall <- alps_extremes$snow_fall * 1000
+```
+
+The last step to make our data frame ready for analysis is normalisation of every land variable.
+
+```{r}
+# Normalising data set
+for (i in 1:12) {
+  alps_extremes[,i] <- (alps_extremes[,i] - mean(alps_extremes[,i])) / sd(alps_extremes[,i])
+}
+```
+
+# Threshold selection
+
+It is key to choose a threshold value, labelled u, that strikes the right balance between bias and variance. This is done graphically.
+
+```{r}
+# plot parameters
+par(cex.axis=2,cex.lab =2)
+par(mfrow=c(1,1))
+par(oma=c(1,0,1,1))
+par(mar=c(5,8,3,3))
+par(mgp=c(4,1,0))
+#c(bottom, left, top, right)
+
+hist(alps_extremes$snow_fall, xlab = "snow fall")
+
+mrl.plot(alps_extremes$snow_fall)
+
+c(quantile(alps_extremes$snow_fall,0.5),quantile(alps_extremes$snow_fall,0.99))
+
+gpd.fitrange(alps_extremes$snow_fall,0.4,8)
+
+u <- 6
+```
+
+The histogram shows that the majority of data satisfies `snow_fall` $<5$. Hence, we seek a threshold $u_0 \geqslant 5$ for which the excesses can be modelled by the GPD.
+
+Above a threshold $u_0$ at which the GPD provides a valid approximation to the excess distribution, the mean residual life plot should be approximately linear in $u$, furthermore the estimates of the shape parameter $\xi$ should be approximately constant, while estimates of $\tilde\sigma$ should
+be linear in $u$.
+
+The mrl shows linearity from approximately $u=6$ to $u=11$ and also from $u=11$ to $u = 13$. While we could choose a threshold value of 11, we would not have enough data to do any meaningful inference. Figure fitragnge shows linearity of the modified scale parameter from around $u=5$ and constant estimates of the shape parameter from $u=6$.
+
+Using this information, we settle for a threshold value $u_0 = 6$.
+
+
+```{r}
+# Intercept model only
+# plot parameters
+par(cex.axis=1.5,cex.lab = 1.5)
+par(mfrow=c(1,1))
+par(oma=c(1,0,1,1))
+par(mar=c(5,8,3,3))
+par(mgp=c(4,1,0))
+#c(bottom, left, top, right)
+
+fit0 <- gpd.fit(xdat = alps_extremes$snow_fall, threshold = u)
+
+# diagnostic plots
+gpd.diag(fit0)
+
+# distribution parameters
+fit0$mle
+```
+
+# Model selection
+
+So far, we have only worked with the `snow_fall` dependent variable. To build the full model we now consider the covariates (land variables). For simplicity and explainability, we choose to build a linear model on the log of the scale parameter, and use Forward AIC model selection.
+
+### Intercept only
+
+```{r}
+print(2 * fit0$nllh + 2 * 2)
+```
+
+### One covariate
+
+```{r}
+
+fit1covariate <- list()
+for (i in 1:12) {
+  fit1covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1), siglink = exp)
+}
+
+for (i in 1:12) {
+  print(c(2 * fit1covariate[[i]]$nllh + 2 * 3, names(alps_extremes)[i]))
+}
+
+# Add second covariate, i.e. ydat = altitude
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt),
+                threshold = u, 
+                sigl = c(1), siglink = exp)
+
+
+gpd.diag(fit1covariate[[2]])
+
+print(fit1covariate[[2]]$nllh * 2 + 2 * 3)
+```
+
+### Two covariates
+
+```{r}
+
+fit2covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt"){
+    fit2covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit2covariate[[i]]$nllh + 2 * 4,names(alps_extremes)[i]))
+}
+
+# Add ninth covariate, i.e. ydat = altitude + isotropy
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy),
+                threshold = u, 
+                sigl = c(1,2), siglink = exp)
+
+gpd.diag(fit2covariate[[9]])
+
+print(fit2covariate[[9]]$nllh * 2 + 2 * 4)
+#cor(alps_extremes$alt,alps_extremes$anisotropy, method = "spearman")
+
+```
+
+### Three covariates
+
+```{r}
+
+fit3covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy"){
+    fit3covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit3covariate[[i]]$nllh + 2 * 5,names(alps_extremes)[i]))
+}
+
+# Add tenth covariate, i.e. ydat = altitude + isotropy + landsea
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea),
+                threshold = u, 
+                sigl = c(1,2,3), siglink = exp)
+
+gpd.diag(fit3covariate[[10]])
+
+print(fit3covariate[[10]]$nllh * 2 + 2 * 5)
+```
+
+### Four covariates
+
+```{r}
+# Step-wise regression
+fit4covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea"){
+    fit4covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit4covariate[[i]]$nllh + 2 * 6,names(alps_extremes)[i]))
+}
+
+# Add fifth covariate, i.e. ydat = altitude + isotropy + land sea + dewpoint temp
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp),
+                threshold = u, 
+                sigl = c(1,2,3,4), siglink = exp)
+
+gpd.diag(fit4covariate[[5]])
+
+print(fit4covariate[[5]]$nllh * 2 + 2 * 6)
+```
+
+### Five covariates
+
+```{r}
+
+fit5covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea" &
+      colnames(alps_extremes)[i] != "dewpoint_temp"){
+    fit5covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit5covariate[[i]]$nllh + 2 * 7,names(alps_extremes)[i]))
+}
+
+# Add first covariate, i.e. ydat = altitude + isotropy + land sea + dewpoint temp + air temp
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp),
+                threshold = u, 
+                sigl = c(1,2,3,4,5), siglink = exp)
+
+gpd.diag(fit5covariate[[1]])
+
+print(fit5covariate[[1]]$nllh * 2 + 2 * 7)
+```
+
+### Six covariates
+
+```{r}
+# Step-wise regression
+fit6covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea" &
+      colnames(alps_extremes)[i] != "dewpoint_temp" &
+      colnames(alps_extremes)[i] != "air_temp"){
+    fit6covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit6covariate[[i]]$nllh + 2 * 8,names(alps_extremes)[i]))
+}
+
+# Add eighth covariate, i.e. ydat = altitude + isotropy + land sea + dewpoint temp + air temp + sd
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6), siglink = exp)
+
+gpd.diag(fit6covariate[[8]])
+
+print(fit6covariate[[8]]$nllh * 2 + 2 * 8)
+```
+
+### Seven covariates
+
+```{r}
+# Step-wise regression
+fit7covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea" &
+      colnames(alps_extremes)[i] != "dewpoint_temp" &
+      colnames(alps_extremes)[i] != "air_temp" &
+      colnames(alps_extremes)[i] != "sd"){
+    fit7covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit7covariate[[i]]$nllh + 2 * 9,names(alps_extremes)[i]))
+}
+
+# Add seventh covariate, i.e. ydat = altitude + isotropy + land sea + dewpoint temp + air temp + sd + slope
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7), siglink = exp)
+
+gpd.diag(fit7covariate[[7]])
+
+print(fit7covariate[[7]]$nllh * 2 + 2 * 9)
+```
+
+### Eight covariates
+
+```{r}
+# Step-wise regression
+fit8covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea" &
+      colnames(alps_extremes)[i] != "dewpoint_temp" &
+      colnames(alps_extremes)[i] != "air_temp" &
+      colnames(alps_extremes)[i] != "sd" &
+      colnames(alps_extremes)[i] != "slope"){
+    fit8covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8), siglink = exp)
+  }
+}
+
+
+for (i in 1:12) {
+  print(c(2 * fit8covariate[[i]]$nllh + 2 * 10,names(alps_extremes)[i]))
+}
+
+# Add twelveth covariate, i.e. ydat = altitude + isotropy + land sea + dewpoint temp + air temp + sd + slope + geopotential
+
+gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope,
+                             alps_extremes$geopotential),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8), siglink = exp)
+
+gpd.diag(fit8covariate[[12]])
+
+print(fit8covariate[[12]]$nllh * 2 + 2 * 10)
+```
+
+### Nine covariates
+
+```{r}
+# Step-wise regression
+fit9covariate <- list()
+
+for (i in 1:12) {
+  if (colnames(alps_extremes)[i] != "alt" &
+      colnames(alps_extremes)[i] != "isotropy" &
+      colnames(alps_extremes)[i] != "land_sea" &
+      colnames(alps_extremes)[i] != "dewpoint_temp" &
+      colnames(alps_extremes)[i] != "air_temp" &
+      colnames(alps_extremes)[i] != "sd" &
+      colnames(alps_extremes)[i] != "slope" &
+      colnames(alps_extremes)[i] != "geopotential"){
+    fit9covariate[[i]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope,
+                             alps_extremes$geopotential,
+                             alps_extremes[,i]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8,9), siglink = exp)
+  }
+}
+
+
+for (i in 1:11) {
+  print(c(2 * fit9covariate[[i]]$nllh + 2 * 11,names(alps_extremes)[i]))
+}
+
+# No more adding since there isn't an improvement in the AIC
+```
+
+### Trying interaction terms
+
+```{r}
+# Step-wise regression
+fit.int1.covariate <- list()
+z = 1
+for (i in 1:12) {
+  for (j in 1:12) {
+    fit.int1.covariate[[z]] <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope,
+                             alps_extremes$geopotential,
+                             alps_extremes[,i]*alps_extremes[,j]),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8,9), siglink = exp)
+    z = z+1
+  }
+}
+
+nllh <- numeric()
+z = 1
+for (i in 1:12) {
+  for (j in 1:12) {
+    print(c(2 * fit.int1.covariate[[z]]$nllh + 2 * 11,names(alps_extremes)[i],names(alps_extremes)[j]))
+    nllh[z] <- 2 * fit.int1.covariate[[z]]$nllh + 2 * 11
+    z = z + 1
+
+  }
+}
+
+
+min(nllh)
+
+# ydat = altitude + isotropy + land sea + dewpoint temp + air temp + sd + slope + geopotential + land_sea*sd
+
+int1 <- gpd.fit(xdat = alps_extremes$snow_fall,
+                ydat = cbind(alps_extremes$alt,
+                             alps_extremes$isotropy,
+                             alps_extremes$land_sea,
+                             alps_extremes$dewpoint_temp,
+                             alps_extremes$air_temp,
+                             alps_extremes$sd,
+                             alps_extremes$slope,
+                             alps_extremes$geopotential,
+                             alps_extremes$land_sea*alps_extremes$sd),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8,9), siglink = exp)
+
+gpd.diag(int1)
+
+print(int1$nllh * 2 + 2 * 11)
+```
+
+Note that we added only one interaction term. Calculating all interaction terms is computationally expensive and adds complexity to the model. We choose to stick with a simpler model, with only one interaction term.
+
+We plot use qq plots for model diagnostic.
+
+```{r}
+fitlin <- gpd.fit(xdat = alps_extremes$snow_fall,
+                  ydat = cbind(alps_extremes$alt,
+                               alps_extremes$isotropy,
+                               alps_extremes$land_sea,
+                               alps_extremes$dewpoint_temp,
+                               alps_extremes$air_temp,
+                               alps_extremes$sd,
+                               alps_extremes$slope,
+                               alps_extremes$geopotential,
+                               alps_extremes$land_sea*alps_extremes$sd),
+                threshold = u, 
+                sigl = c(1,2,3,4,5,6,7,8,9), siglink = exp)
+gpd.diag(fitlin)
+```
+
+
+# Analysis of fitted linear model
+
+Firstly, we want to obtain a table for the coefficients of the covariates. To obtain the confidence levels for the coefficients, we use non-parametric bootstrapping, where the code is given below.
+
+```{r}
+# Non-parametric bootstrap
+fit.boot <- list()
+MLE.boot <- array(dim = c(11,1000))
+for (i in 1:1000) {
+  alps_bootstrap <- alps_extremes[sample(1:nrow(alps_extremes), replace = TRUE),]
+  
+  fit.boot[[i]] <- gpd.fit(xdat = alps_bootstrap$snow_fall,
+                      ydat = cbind(alps_bootstrap$alt,
+                                   alps_bootstrap$isotropy,
+                                   alps_bootstrap$land_sea,
+                                   alps_bootstrap$dewpoint_temp,
+                                   alps_bootstrap$air_temp,
+                                   alps_bootstrap$sd,
+                                   alps_bootstrap$slope,
+                                   alps_bootstrap$geopotential,
+                                   alps_bootstrap$land_sea*alps_bootstrap$sd),
+                      threshold = u, 
+                      sigl = c(1,2,3,4,5,6,7,8,9), siglink = exp)
+  for (j in 1:11) {
+    MLE.boot[j,i] <-  fit.boot[[i]]$mle[j]
+  }
+}
+
+MLE.ci <- list()
+
+for (i in 1:11) {
+  low <- quantile(MLE.boot[i,],0.025)
+  high <- quantile(MLE.boot[i,],0.975)
+  med <- quantile(MLE.boot[i,],0.5)
+  
+  MLE.ci[[i]] <- c(low,high,med)
+}
+```
+
+The full model and the coefficients of the covariates, with a 95\% confidence interval, is the following:
+$$\begin{align*}
+\log\tilde\sigma &= \beta_0
++ \beta_{altitude} \cdot \text{altitude}
++ \beta_{isotropy} \cdot \text{isotropy} 
++ \beta_{land\_sea} \cdot \text{land\_sea} + {}\\
+&+ \beta_{dewpoint\;temp} \cdot \text{dewpoint temp}  
++ \beta_{aor\;temp} \cdot \text{air temp}
++ \beta_{sd} \cdot \text{sd}
++ \beta_{slope} \cdot \text{slope} + {}\\
+&+ \beta_{geopotential} \cdot \text{geopotential} 
++ \beta_{interaction} \cdot \text{land\_sea}*\text{sd} \\\\
+\xi &= -0.163 \;\;\;\; (-0.232,-0.092)
+\end{align*}$$
+where
+$$\begin{align*}
+\beta_0 &= -0.422 \quad (-1.284,0.753)\\
+\beta_{altitude} &= +0.129 \quad (0.030,0.237)\\
+\beta_{isotropy} &= +0.135 \quad (-0.001,0.274)\\
+\beta_{land\_sea} &= +0.772 \quad (-2.772,3.964)\\
+\beta_{dewpoint\;temp} &= +1.356 \quad (0.229,1.891)\\
+\beta_{air\;temp} &= -1.388 \quad (-2.045,-0.159)\\
+\beta_{sd} &= -0.258 \quad (-1.418,0.762)\\
+\beta_{slope} &= +0.255 \quad (-0.231,0.624)\\
+\beta_{geopotential} &= -0.004 \quad (-0.198,0.200)\\
+\beta_{interaction} &= +0.613 \quad (-1.98,3.966).
+\end{align*}$$
+
+
+The first thing to note is that the shape parameter is negative, which suggests that the distribution has a finite upper bound. This makes sense as we don't expect an unbounded amount of snowfall, and given that it does snow, we can predict an upper bound for the amount of snowfall (this can be calculated using $u-\tilde\sigma/\xi$).
+
+Furthermore, we see that the statistically significant covariates are altitude, air temperature, and dew point temperature. As expected, higher altitude, lower temperature, and higher dew point temperature increase the amount of snowfalls.
+
+We conclude this analysis by showing how this model can be used to predict an upper bound for snowfalls in the Alps, given it does snow. We use the earlier example of snowfalls in December 2021. Figure \ref{fig:prediction} shows the plot that the code below produces and is compared to the observed values in that month.
+
+```{r}
+# Creates a dataframe with only the significant covariates
+alps_significant <- data.frame(alt,isotropy,land_sea,dewpoint_temp,air_temp,sd,slope,geopotential,snow_fall,lon,lat,dates)
+alps_significant <- na.omit(alps_significant)
+
+alps_significant$snow_fall <- alps_significant$snow_fall * 1000
+for (i in 1:8) {
+  alps_significant[,i] <- (alps_significant[,i] - mean(alps_significant[alps_significant$snow_fall > 0,i])) / sd(alps_significant[alps_significant$snow_fall > 0,i])
+}
+
+# Sets a specific date
+date <- "2021-12"
+
+alps_significant <- alps_significant[alps_significant$dates == date,]
+
+# Calculates the return levels for each row in the dataframe
+X1 <- cbind(rep(c(1),nrow(alps_significant)),
+                alps_significant$alt,
+                alps_significant$isotropy,
+                alps_significant$land_sea,
+                alps_significant$dewpoint_temp,
+                alps_significant$air_temp,
+                alps_significant$sd,
+                alps_significant$slope,
+                alps_significant$geopotential,
+                alps_significant$land_sea*alps_significant$sd)
+                
+beta.low <- numeric()
+for (i in 1:10) {
+  beta.low[i] <- MLE.ci[[i]][1]
+}
+
+beta.high <- numeric()
+for (i in 1:10) {
+  beta.high[i] <- MLE.ci[[i]][2]
+}
+
+beta.avg <- numeric()
+for (i in 1:10) {
+  beta.avg[i] <- MLE.ci[[i]][3]
+}
+
+sigma.low <- exp(X1 %*% beta.low)
+sigma.high <- exp(X1 %*% beta.high)
+sigma.avg <- exp(X1 %*% beta.avg)
+
+returnlvl <- u - sigma.avg / MLE.ci[[11]][3]
+
+
+
+df <- data.frame("snowfall"=c(returnlvl),
+                 "lon"=c(alps_significant$lon),
+                 "lat"=c(alps_significant$lat)
+)
+
+# Plots the results
+
+library(ggplot2)
+library(ggmap)
+
+# plot parameters
+par(cex.axis=2,cex.lab =2.5)
+par(mfrow=c(1,1))
+par(oma=c(2,2,2,2))
+par(mar=c(2,2,2,2))
+par(mgp=c(0,2,0))
+#c(bottom, left, top, right)
+
+indbox = make_bbox(lon = c(min(df$lon), max(df$lon))+c(-3,3), lat = c(max(df$lat), min(df$lat)), f = 0)
+world <- map_data("world")
+p = ggplot() +
+  geom_map(
+    data = world, map = world,
+    aes(long, lat, map_id = region),
+    color = "black", fill = "lightgray", size = 0.1
+  ) + scale_x_continuous(limits=indbox[c(1,3)]) + scale_y_continuous(limits=indbox[c(2,4)]) + coord_fixed(ratio=1.4) +
+geom_tile(df, mapping = aes(x = lon, y = lat, fill = snowfall), width = 0.27, height = 0.27) + theme(text = element_text(size=20))
+
+p
+```
+
+
+
+# Appendix 1: k-fold cross-validation
+
+A more robust method such as $k$-fold cross validation might yield better results. This is an implementation of 5-fold cross-validation.
+
+```{r}
+shuffleshuffle <- function() {
+  
+  tobereturned <- list()
+  
+  # Removes temporal dependencies and thresholds the data
+  alps_shuffled <- alps_extremes[sample(1:nrow(alps_extremes), replace = FALSE),]
+  alps_shuffled <- alps_shuffled[alps_shuffled$snow_fall > 6,]
+  
+  # Separates dataframe in 5 folds
+  folds <- list()
+  for (i in 1:5) {
+    folds[[i]] <- alps_shuffled[((nrow(alps_shuffled)*((i-1)/5))+1):(nrow(alps_shuffled)*(i/5)),]
+  }
+  # Groups together 4 of the 5 folds for fitting and leaves out 1 for evaluation
+  foldtraining <- list()
+  for (i in 1:5) {
+    foldtraining[[i]] <- rbind(folds[[(((i) %% 5) + 1)]],folds[[(((i+1) %% 5) + 1)]],folds[[(((i+2) %% 5) + 1)]],folds[[(((i+3) %% 5) + 1)]])
+  
+    #print(c(  (((i) %% 5) + 1), (((i+1) %% 5) + 1), (((i+2) %% 5) + 1), (((i+3) %% 5) + 1)                 ))
+  }
+  
+  tobereturned[[1]] <- folds
+  tobereturned[[2]] <- foldtraining
+  
+  return(tobereturned)
+}
+```
+
+### One covariate
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit1.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh1.5kfold <- numeric()
+    fit <- list()
+    for (i in 1:5) {
+      fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                          ydat = cbind(foldtraining[[i]][,j]),
+                          threshold = 6, 
+                          sigl = c(1), siglink = exp)
+      X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                   folds[[i]][,j])
+      beta <-c(fit[[i]]$mle[1],
+               fit[[i]]$mle[2])
+      sigma <- exp(X_1 %*% beta)
+      
+      nllh1.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                   sigma = sigma,
+                                   xi = fit[[i]]$mle[3],
+                                   log.d = TRUE, u = 6))
+    }
+    fit1.5kfold[j] <- (sum(nllh1.5kfold)/5)
+  }
+  mylistpacked[[k]] <- fit1.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+
+# Add second covariate, i.e. ydat = altitude
+```
+
+### Two covariates
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit2.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh2.5kfold <- numeric()
+    fit <- list()
+    if (colnames(alps_extremes)[j] != "alt") {
+      for (i in 1:5) {
+        fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                    ydat = cbind(foldtraining[[i]]$alt,
+                                 foldtraining[[i]][,j]),
+                    threshold = u, 
+                    sigl = c(1,2), siglink = exp)
+        X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                     folds[[i]]$alt,
+                     folds[[i]][,j])
+        beta <-c(fit[[i]]$mle[1],
+                 fit[[i]]$mle[2],
+                 fit[[i]]$mle[3])
+        sigma <- exp(X_1 %*% beta)
+        
+        nllh2.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                     sigma = sigma,
+                                     xi = fit[[i]]$mle[4],
+                                     log.d = TRUE, u = 6))
+        fit2.5kfold[j] <- (sum(nllh2.5kfold)/5)
+        }
+      } else {
+        fit2.5kfold[j] <- 0
+    }
+  }
+  mylistpacked[[k]] <- fit2.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+# Add ninth covariate, i.e. ydat = altitude + isotropy
+
+```
+
+### Three covariates
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit3.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh3.5kfold <- numeric()
+    fit <- list()
+      if (colnames(alps_extremes)[j] != "alt" &
+          colnames(alps_extremes)[j] != "isotropy"){
+      for (i in 1:5) {
+        fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                        ydat = cbind(foldtraining[[i]]$alt,
+                                     foldtraining[[i]]$isotropy,
+                                     foldtraining[[i]][,j]),
+                        threshold = u, 
+                        sigl = c(1,2,3), siglink = exp)
+        X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                       folds[[i]]$alt,
+                       folds[[i]]$isotropy,
+                       folds[[i]][,j])
+        beta <-c(fit[[i]]$mle[1],
+                   fit[[i]]$mle[2],
+                   fit[[i]]$mle[3],
+                   fit[[i]]$mle[4])
+        sigma <- exp(X_1 %*% beta)
+          
+        nllh3.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                       sigma = sigma,
+                                       xi = fit[[i]]$mle[5],
+                                       log.d = TRUE, u = 6))
+        fit3.5kfold[j] <- (sum(nllh3.5kfold)/5)
+        }
+      } else {
+        fit3.5kfold[j] <- 0
+    }
+  }
+  mylistpacked[[k]] <- fit3.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+# Add tenth covariate, i.e. ydat = altitude + isotropy + landsea
+```
+
+### Four covariates
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit4.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh4.5kfold <- numeric()
+    fit <- list()
+      if (colnames(alps_extremes)[j] != "alt" &
+          colnames(alps_extremes)[j] != "isotropy" &
+          colnames(alps_extremes)[j] != "land_sea"){
+      for (i in 1:5) {
+        fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                            ydat = cbind(foldtraining[[i]]$alt,
+                                         foldtraining[[i]]$isotropy,
+                                         foldtraining[[i]]$land_sea,
+                                         foldtraining[[i]][,j]),
+                            threshold = u,
+                            sigl = c(1,2,3,4), siglink = exp)
+        X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                     folds[[i]]$alt,
+                     folds[[i]]$isotropy,
+                     folds[[i]]$land_sea,
+                     folds[[i]][,j])
+        beta <-c(fit[[i]]$mle[1],
+                 fit[[i]]$mle[2],
+                 fit[[i]]$mle[3],
+                 fit[[i]]$mle[4],
+                 fit[[i]]$mle[5])
+        sigma <- exp(X_1 %*% beta)
+          
+        nllh4.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                       sigma = sigma,
+                                       xi = fit[[i]]$mle[6],
+                                       log.d = TRUE, u = 6))
+        fit4.5kfold[j] <- (sum(nllh4.5kfold)/5)
+        }
+      } else {
+        fit4.5kfold[j] <- 0
+    }
+  }
+  mylistpacked[[k]] <- fit4.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+# Add fifth covariate, i.e. ydat = altitude + isotropy + landsea + dewpoint temp
+```
+
+### Five covariates
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit5.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh5.5kfold <- numeric()
+    fit <- list()
+      if (colnames(alps_extremes)[j] != "alt" &
+          colnames(alps_extremes)[j] != "isotropy" &
+          colnames(alps_extremes)[j] != "land_sea" &
+          colnames(alps_extremes)[j] != "dewpoint_temp"){
+      for (i in 1:5) {
+        fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                            ydat = cbind(foldtraining[[i]]$alt,
+                                         foldtraining[[i]]$isotropy,
+                                         foldtraining[[i]]$land_sea,
+                                         foldtraining[[i]]$dewpoint_temp,
+                                         foldtraining[[i]][,j]),
+                            threshold = u,
+                            sigl = c(1,2,3,4,5), siglink = exp)
+        X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                     folds[[i]]$alt,
+                     folds[[i]]$isotropy,
+                     folds[[i]]$land_sea,
+                     folds[[i]]$dewpoint_temp,
+                     folds[[i]][,j])
+        beta <-c(fit[[i]]$mle[1],
+                 fit[[i]]$mle[2],
+                 fit[[i]]$mle[3],
+                 fit[[i]]$mle[4],
+                 fit[[i]]$mle[5],
+                 fit[[i]]$mle[6])
+        sigma <- exp(X_1 %*% beta)
+          
+        nllh5.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                       sigma = sigma,
+                                       xi = fit[[i]]$mle[7],
+                                       log.d = TRUE, u = 6))
+        fit5.5kfold[j] <- (sum(nllh5.5kfold)/5)
+        }
+      } else {
+        fit5.5kfold[j] <- 0
+    }
+  }
+  mylistpacked[[k]] <- fit5.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+# Add first covariate, i.e. ydat = altitude + isotropy + landsea + dewpoint temp + air temp
+```
+
+### Six covariates
+
+```{r}
+mylistpacked <- list()
+for (k in 1:50) {
+  fit6.5kfold <- list()
+  folds <- shuffleshuffle()[[1]]
+  foldtraining <- shuffleshuffle()[[2]]
+  for (j in 1:12) {
+    nllh6.5kfold <- numeric()
+    fit <- list()
+      if (colnames(alps_extremes)[j] != "alt" &
+          colnames(alps_extremes)[j] != "isotropy" &
+          colnames(alps_extremes)[j] != "land_sea" &
+          colnames(alps_extremes)[j] != "dewpoint_temp" &
+          colnames(alps_extremes)[j] != "air_temp"){
+      for (i in 1:5) {
+        fit[[i]] <- gpd.fit(xdat = foldtraining[[i]]$snow_fall,
+                            ydat = cbind(foldtraining[[i]]$alt,
+                                         foldtraining[[i]]$isotropy,
+                                         foldtraining[[i]]$land_sea,
+                                         foldtraining[[i]]$dewpoint_temp,
+                                         foldtraining[[i]]$air_temp,
+                                         foldtraining[[i]][,j]),
+                            threshold = u,
+                            sigl = c(1,2,3,4,5,6), siglink = exp)
+        X_1 <- cbind(rep(c(1),nrow(folds[[i]])),
+                     folds[[i]]$alt,
+                     folds[[i]]$isotropy,
+                     folds[[i]]$land_sea,
+                     folds[[i]]$dewpoint_temp,
+                     folds[[i]]$air_temp,
+                     folds[[i]][,j])
+        beta <-c(fit[[i]]$mle[1],
+                 fit[[i]]$mle[2],
+                 fit[[i]]$mle[3],
+                 fit[[i]]$mle[4],
+                 fit[[i]]$mle[5],
+                 fit[[i]]$mle[6],
+                 fit[[i]]$mle[7])
+        sigma <- exp(X_1 %*% beta)
+          
+        nllh6.5kfold[i] <- -sum(dgpd(folds[[i]]$snow_fall,
+                                       sigma = sigma,
+                                       xi = fit[[i]]$mle[8],
+                                       log.d = TRUE, u = 6))
+        fit6.5kfold[j] <- (sum(nllh6.5kfold)/5)
+        }
+      } else {
+        fit6.5kfold[j] <- 0
+    }
+  }
+  mylistpacked[[k]] <- fit6.5kfold
+}
+
+mylistunpacked <- list()
+for (i in 1:12) {
+  templist <- numeric()
+  for (j in 1:50) {
+    templist[j] <- mylistpacked[[j]][i]
+  }
+  mylistunpacked[i] <- sum(as.numeric(templist)) / 50
+}
+
+for (i in 1:12) {
+  print(c(mylistunpacked[[i]],names(alps_extremes)[i]))
+}
+# Add f covariate, i.e. ydat = altitude + isotropy + landsea + dewpoint temp + air temp
+```
+
+When fitting the model to the training data, the model is not valid in the validation fold. A different method would be required to do model selection; however, since the choice of covariates hasn't differed from the AIC method, we suggest to proceed to take the full model as found earlier.
