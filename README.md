@@ -14,4 +14,4 @@ In this project, we produce R code to model extreme snowfalls in the Italian Alp
 <h2>Repository Content</h2>
 
 - <b>Report written in LaTeX (source and pdf)</b>
-- <b>`R` Markdown notebook containg the code used to compute results and produce plots</b>
+- <b>A folder containg the `R` Markdown notebook and the dataset</b>
