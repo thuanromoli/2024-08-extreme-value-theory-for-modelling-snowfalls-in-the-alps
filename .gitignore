@@ -1,0 +1,9 @@
+# macOS Finder metadata
+.DS_Store
+
+# Local R session files
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
